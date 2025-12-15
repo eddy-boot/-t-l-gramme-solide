@@ -1,0 +1,712 @@
+
+/*
+* ESP32 WROOM-32 avec écran ST7789V 240x320
+* VU-MÈTRE RGB PROFESSIONNEL
+*
+* Styles de VU-mètres inclus:
+* 1. VU-mètre classique (barres verticales)
+* 2. VU-mètre circulaire (style vintage)
+* 3. VU-mètre spectral (analyseur de fréquences)
+* 4. VU-mètre radial (double cercle)
+* 5. VU-mètre cascade (waterfall)
+* 6. VU-mètre plasma (effet RGB fluide)
+*
+* CONNEXIONS:
+* ST7789V VCC -> ESP32 3.3V
+* ST7789V GND -> ESP32 GND
+* ST7789V SCL -> ESP32 GPIO18
+* ST7789V SDA -> ESP32 GPIO23
+* ST7789V RES -> ESP32 GPIO4
+* ST7789V DC  -> ESP32 GPIO2
+* ST7789V CS  -> ESP32 GPIO5
+* ST7789V BL  -> ESP32 3.3V
+*
+* ENTRÉE AUDIO (OPTIONNEL):
+* Audio IN -> ESP32 GPIO34 (ADC1_CH6)
+* (ou utiliser les valeurs simulées)
+*/
+
+#include <SPI.h>
+
+// Pins
+#define TFT_DC    2
+#define TFT_CS    5
+#define TFT_RST   4
+#define TFT_MOSI  23
+#define TFT_SCLK  18
+
+// Pin audio (optionnel)
+#define AUDIO_PIN 34
+
+// Dimensions
+#define SCREEN_WIDTH  240
+#define SCREEN_HEIGHT 320
+
+// Couleurs RGB565
+#define NOIR    0x0000
+#define BLANC   0xFFFF
+#define ROUGE   0xF800
+#define VERT    0x07E0
+#define BLEU    0x001F
+#define JAUNE   0xFFE0
+#define CYAN    0x07FF
+#define MAGENTA 0xF81F
+#define ORANGE  0xFD20
+#define VIOLET  0x8010
+#define ROSE    0xFBEA
+
+SPIClass hspi(HSPI);
+
+// Variables globales
+int mode = 0; // Mode d'affichage
+int levels[16]; // Niveaux pour barres multiples
+int peakLevels[16]; // Pics mémorisés
+int cascadeBuffer[240][50]; // Buffer cascade
+int cascadePos = 0;
+
+// Commandes ST7789V
+#define ST7789_SWRESET  0x01
+#define ST7789_SLPOUT   0x11
+#define ST7789_NORON    0x13
+#define ST7789_INVON    0x21
+#define ST7789_DISPON   0x29
+#define ST7789_CASET    0x2A
+#define ST7789_RASET    0x2B
+#define ST7789_RAMWR    0x2C
+#define ST7789_MADCTL   0x36
+#define ST7789_COLMOD   0x3A
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+ 
+  Serial.println("\n=================================");
+  Serial.println("VU-METRE RGB PROFESSIONNEL");
+  Serial.println("=================================\n");
+ 
+  // Configuration pins
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_DC, OUTPUT);
+  pinMode(TFT_RST, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_RST, HIGH);
+ 
+  // Configuration audio (optionnel)
+  pinMode(AUDIO_PIN, INPUT);
+ 
+  // Init SPI
+  hspi.begin(TFT_SCLK, -1, TFT_MOSI, -1);
+  hspi.setFrequency(40000000);
+ 
+  // Reset
+  digitalWrite(TFT_RST, LOW);
+  delay(100);
+  digitalWrite(TFT_RST, HIGH);
+  delay(150);
+ 
+  // Init écran
+  initST7789();
+  fillScreen(NOIR);
+ 
+  // Init buffers
+  for(int i = 0; i < 16; i++) {
+    levels[i] = 0;
+    peakLevels[i] = 0;
+  }
+ 
+  Serial.println("Initialisation OK!");
+  Serial.println("Modes disponibles:");
+  Serial.println("0 = VU classique");
+  Serial.println("1 = VU circulaire");
+  Serial.println("2 = Analyseur spectral");
+  Serial.println("3 = VU radial");
+  Serial.println("4 = Cascade");
+  Serial.println("5 = Plasma RGB\n");
+ 
+  // Message de démarrage
+  afficherTitre();
+  delay(2000);
+}
+
+void loop() {
+  // Lire le signal audio (ou simuler)
+  int audioLevel = lireAudio();
+ 
+  // Générer les niveaux pour différentes bandes
+  genererNiveaux(audioLevel);
+ 
+  // Afficher selon le mode
+  switch(mode) {
+    case 0:
+      vuClassique();
+      break;
+    case 1:
+      vuCirculaire();
+      break;
+    case 2:
+      analyseurSpectral();
+      break;
+    case 3:
+      vuRadial();
+      break;
+    case 4:
+      vuCascade();
+      break;
+    case 5:
+      vuPlasma();
+      break;
+  }
+ 
+  delay(30); // ~33 FPS
+ 
+  // Changer de mode toutes les 10 secondes
+  static unsigned long lastChange = 0;
+  if(millis() - lastChange > 10000) {
+    mode = (mode + 1) % 6;
+    fillScreen(NOIR);
+    lastChange = millis();
+    Serial.print("Mode change: ");
+    Serial.println(mode);
+  }
+}
+
+// Lire le niveau audio (ou simuler)
+int lireAudio() {
+  // Option 1: Lire ADC si connecté
+  // int raw = analogRead(AUDIO_PIN);
+  // return map(raw, 0, 4095, 0, 100);
+ 
+  // Option 2: Simuler avec sinus + random
+  static float t = 0;
+  t += 0.1;
+  int base = (sin(t) * 30 + 50);
+  int noise = random(-15, 15);
+  return constrain(base + noise, 0, 100);
+}
+
+// Générer niveaux pour différentes bandes
+void genererNiveaux(int audioLevel) {
+  for(int i = 0; i < 16; i++) {
+    // Simuler différentes fréquences
+    float freq = (i + 1) * 0.3;
+    int variation = sin(millis() * 0.001 * freq) * 20;
+    int target = audioLevel + variation + random(-10, 10);
+    target = constrain(target, 0, 100);
+   
+    // Lissage
+    levels[i] = (levels[i] * 3 + target) / 4;
+   
+    // Mémoriser pics
+    if(levels[i] > peakLevels[i]) {
+      peakLevels[i] = levels[i];
+    } else {
+      peakLevels[i] = max(0, peakLevels[i] - 2);
+    }
+  }
+}
+
+// VU-mètre classique (barres verticales)
+void vuClassique() {
+  static int lastLevels[16] = {0};
+ 
+  int barWidth = 13;
+  int spacing = 2;
+  int startX = 5;
+ 
+  for(int i = 0; i < 16; i++) {
+    int x = startX + i * (barWidth + spacing);
+    int h = map(levels[i], 0, 100, 0, 250);
+    int lastH = map(lastLevels[i], 0, 100, 0, 250);
+   
+    // Effacer ancienne barre si nécessaire
+    if(h < lastH) {
+      fillRect(x, 50, barWidth, lastH - h, NOIR);
+    }
+   
+    // Dessiner nouvelle barre avec gradient
+    for(int y = 0; y < h; y++) {
+      uint16_t color;
+      if(y < h * 0.6) {
+        color = VERT;
+      } else if(y < h * 0.85) {
+        color = JAUNE;
+      } else {
+        color = ROUGE;
+      }
+      drawFastHLine(x, 300 - y, barWidth, color);
+    }
+   
+    // Dessiner pic
+    int peakH = map(peakLevels[i], 0, 100, 0, 250);
+    drawFastHLine(x, 300 - peakH, barWidth, CYAN);
+   
+    lastLevels[i] = levels[i];
+  }
+ 
+  // Titre
+  fillRect(0, 0, 240, 35, NOIR);
+  drawCenteredText("VU CLASSIQUE", 15, BLANC);
+}
+
+// VU-mètre circulaire (style vintage)
+void vuCirculaire() {
+  static int lastLevel = 0;
+ 
+  int centerX = 120;
+  int centerY = 160;
+  int radius = 90;
+ 
+  // Effacer ancien
+  fillCircle(centerX, centerY, radius + 10, NOIR);
+ 
+  // Cercle extérieur
+  drawCircle(centerX, centerY, radius, BLANC);
+  drawCircle(centerX, centerY, radius - 5, BLANC);
+ 
+  // Graduations
+  for(int i = 0; i <= 20; i++) {
+    float angle = map(i, 0, 20, 135, 45); // -135° à +45°
+    float rad = radians(angle);
+    int x1 = centerX + cos(rad) * (radius - 10);
+    int y1 = centerY + sin(rad) * (radius - 10);
+    int x2 = centerX + cos(rad) * (radius - 20);
+    int y2 = centerY + sin(rad) * (radius - 20);
+   
+    uint16_t color = BLANC;
+    if(i > 15) color = ROUGE;
+    else if(i > 10) color = JAUNE;
+   
+    drawLine(x1, y1, x2, y2, color);
+  }
+ 
+  // Moyenne des niveaux
+  int avgLevel = 0;
+  for(int i = 0; i < 16; i++) {
+    avgLevel += levels[i];
+  }
+  avgLevel /= 16;
+ 
+  // Aiguille
+  float angle = map(avgLevel, 0, 100, 135, 45);
+  float rad = radians(angle);
+  int needleX = centerX + cos(rad) * (radius - 15);
+  int needleY = centerY + sin(rad) * (radius - 15);
+ 
+  // Pivot
+  fillCircle(centerX, centerY, 8, BLANC);
+  fillCircle(centerX, centerY, 5, ROUGE);
+ 
+  // Aiguille avec épaisseur
+  for(int i = -2; i <= 2; i++) {
+    int offsetX = sin(rad) * i;
+    int offsetY = -cos(rad) * i;
+    drawLine(centerX + offsetX, centerY + offsetY,
+             needleX + offsetX, needleY + offsetY, ROUGE);
+  }
+ 
+  // Titre
+  drawCenteredText("VU CIRCULAIRE", 15, CYAN);
+ 
+  lastLevel = avgLevel;
+}
+
+// Analyseur spectral
+void analyseurSpectral() {
+  static int lastLevels[16] = {0};
+ 
+  int barWidth = 13;
+  int spacing = 2;
+  int startX = 5;
+  int startY = 60;
+ 
+  for(int i = 0; i < 16; i++) {
+    int x = startX + i * (barWidth + spacing);
+    int h = map(levels[i], 0, 100, 0, 230);
+    int lastH = map(lastLevels[i], 0, 100, 0, 230);
+   
+    // Effacer ancienne barre
+    if(h < lastH) {
+      fillRect(x, startY, barWidth, lastH - h, NOIR);
+    }
+   
+    // Dessiner avec effet 3D et RGB
+    for(int y = 0; y < h; y += 3) {
+      // Gradient RGB selon fréquence
+      uint16_t color;
+      if(i < 5) {
+        color = rgb(255 - y, 0, y); // Rouge->Violet (bass)
+      } else if(i < 11) {
+        color = rgb(0, 255 - y, y); // Vert->Cyan (mid)
+      } else {
+        color = rgb(y, y, 255); // Bleu clair (high)
+      }
+     
+      fillRect(x, startY + (230 - y), barWidth, 2, color);
+    }
+   
+    // Effet brillance
+    fillRect(x, startY + (230 - h), 2, h, BLANC);
+   
+    lastLevels[i] = levels[i];
+  }
+ 
+  // Titre avec style
+  fillRect(0, 0, 240, 50, NOIR);
+  drawCenteredText("ANALYSEUR SPECTRAL", 15, CYAN);
+  drawCenteredText("16 BANDES", 35, MAGENTA);
+}
+
+// VU-mètre radial (double cercle)
+void vuRadial() {
+  int centerX = 120;
+  int centerY = 160;
+ 
+  // Effacer
+  fillCircle(centerX, centerY, 100, NOIR);
+ 
+  // Cercle intérieur (bass)
+  int avgBass = 0;
+  for(int i = 0; i < 5; i++) avgBass += levels[i];
+  avgBass /= 5;
+  int radiusBass = map(avgBass, 0, 100, 20, 70);
+ 
+  for(int r = 20; r < radiusBass; r += 2) {
+    uint16_t color = rgb(255, 0, 255 - (r * 3));
+    drawCircle(centerX, centerY, r, color);
+  }
+ 
+  // Cercle extérieur (high)
+  for(int i = 0; i < 16; i++) {
+    float angle = i * 22.5; // 360/16
+    int len = map(levels[i], 0, 100, 0, 50);
+   
+    float rad = radians(angle);
+    int x1 = centerX + cos(rad) * 75;
+    int y1 = centerY + sin(rad) * 75;
+    int x2 = centerX + cos(rad) * (75 + len);
+    int y2 = centerY + sin(rad) * (75 + len);
+   
+    // Couleur selon niveau
+    uint16_t color;
+    if(levels[i] > 75) color = ROUGE;
+    else if(levels[i] > 50) color = JAUNE;
+    else color = CYAN;
+   
+    // Ligne épaisse
+    for(int j = -1; j <= 1; j++) {
+      int offsetX = sin(rad) * j * 2;
+      int offsetY = -cos(rad) * j * 2;
+      drawLine(x1 + offsetX, y1 + offsetY, x2 + offsetX, y2 + offsetY, color);
+    }
+  }
+ 
+  // Titre
+  drawCenteredText("VU RADIAL", 15, BLANC);
+}
+
+// VU-mètre cascade (waterfall)
+void vuCascade() {
+  // Décaler le buffer
+  for(int x = 0; x < 240; x++) {
+    for(int y = 49; y > 0; y--) {
+      cascadeBuffer[x][y] = cascadeBuffer[x][y - 1];
+    }
+  }
+ 
+  // Ajouter nouvelle ligne
+  for(int i = 0; i < 16; i++) {
+    int x = i * 15;
+    for(int j = 0; j < 15; j++) {
+      cascadeBuffer[x + j][0] = levels[i];
+    }
+  }
+ 
+  // Afficher le buffer
+  int startY = 80;
+  for(int y = 0; y < 50; y++) {
+    for(int x = 0; x < 240; x++) {
+      int val = cascadeBuffer[x][y];
+      uint16_t color;
+     
+      if(val > 80) color = rgb(255, 0, 0);
+      else if(val > 60) color = rgb(255, 128, 0);
+      else if(val > 40) color = rgb(255, 255, 0);
+      else if(val > 20) color = rgb(0, 255, 0);
+      else if(val > 5) color = rgb(0, 128, 255);
+      else color = NOIR;
+     
+      drawPixel(x, startY + y * 4, color);
+    }
+  }
+ 
+  // Titre
+  fillRect(0, 0, 240, 70, NOIR);
+  drawCenteredText("CASCADE", 15, CYAN);
+  drawCenteredText("WATERFALL", 35, MAGENTA);
+}
+
+// VU-mètre plasma RGB
+void vuPlasma() {
+  static float t = 0;
+  t += 0.05;
+ 
+  int avgLevel = 0;
+  for(int i = 0; i < 16; i++) avgLevel += levels[i];
+  avgLevel /= 16;
+ 
+  float intensity = avgLevel / 100.0;
+ 
+  // Générer plasma
+  for(int y = 50; y < 300; y += 4) {
+    for(int x = 0; x < 240; x += 4) {
+      float v1 = sin((x + t * 50) * 0.02);
+      float v2 = sin((y + t * 30) * 0.02);
+      float v3 = sin((x + y + t * 40) * 0.01);
+      float plasma = (v1 + v2 + v3) * intensity;
+     
+      int r = (sin(plasma * 3.14) + 1) * 127;
+      int g = (sin(plasma * 3.14 + 2) + 1) * 127;
+      int b = (sin(plasma * 3.14 + 4) + 1) * 127;
+     
+      uint16_t color = rgb(r, g, b);
+      fillRect(x, y, 4, 4, color);
+    }
+  }
+ 
+  // Titre
+  fillRect(0, 0, 240, 45, NOIR);
+  drawCenteredText("PLASMA RGB", 20, BLANC);
+}
+
+// Message titre
+void afficherTitre() {
+  fillScreen(NOIR);
+ 
+  // Fond dégradé
+  for(int y = 0; y < 320; y += 2) {
+    uint16_t color = rgb(0, 0, 255 - (y / 2));
+    drawFastHLine(0, y, 240, color);
+  }
+ 
+  // Titre
+  fillRect(20, 120, 200, 80, NOIR);
+  drawRect(20, 120, 200, 80, CYAN);
+  drawRect(22, 122, 196, 76, CYAN);
+ 
+  drawCenteredText("VU-METRE", 140, BLANC);
+  drawCenteredText("RGB", 165, CYAN);
+}
+
+// Texte centré
+void drawCenteredText(const char* text, int y, uint16_t color) {
+  int len = strlen(text);
+  int x = (240 - len * 6) / 2;
+ 
+  for(int i = 0; i < len; i++) {
+    drawChar(x + i * 12, y, text[i], color);
+  }
+}
+
+// Dessiner un caractère simplifié
+void drawChar(int x, int y, char c, uint16_t color) {
+  // Version simple: rectangle pour chaque lettre
+  fillRect(x, y, 10, 16, color);
+}
+
+// Convertir RGB888 vers RGB565
+uint16_t rgb(int r, int g, int b) {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+// Fonctions de base écran
+void initST7789() {
+  writeCommand(ST7789_SWRESET);
+  delay(150);
+  writeCommand(ST7789_SLPOUT);
+  delay(120);
+  writeCommand(ST7789_COLMOD);
+  writeData(0x55);
+  delay(10);
+  writeCommand(ST7789_MADCTL);
+  writeData(0x00);
+  delay(10);
+  writeCommand(ST7789_NORON);
+  delay(10);
+  writeCommand(ST7789_INVON);
+  delay(10);
+  writeCommand(ST7789_DISPON);
+  delay(120);
+}
+
+void writeCommand(uint8_t cmd) {
+  digitalWrite(TFT_DC, LOW);
+  digitalWrite(TFT_CS, LOW);
+  hspi.write(cmd);
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void writeData(uint8_t data) {
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  hspi.write(data);
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void setWindow(int x0, int y0, int x1, int y1) {
+  writeCommand(ST7789_CASET);
+  writeData(x0 >> 8);
+  writeData(x0 & 0xFF);
+  writeData(x1 >> 8);
+  writeData(x1 & 0xFF);
+  writeCommand(ST7789_RASET);
+  writeData(y0 >> 8);
+  writeData(y0 & 0xFF);
+  writeData(y1 >> 8);
+  writeData(y1 & 0xFF);
+  writeCommand(ST7789_RAMWR);
+}
+
+void fillScreen(uint16_t color) {
+  setWindow(0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  for(uint32_t i = 0; i < (uint32_t)SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
+    hspi.write16(color);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void drawPixel(int x, int y, uint16_t color) {
+  if(x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) return;
+  setWindow(x, y, x, y);
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  hspi.write16(color);
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void drawFastHLine(int x, int y, int w, uint16_t color) {
+  if(x >= SCREEN_WIDTH || y >= SCREEN_HEIGHT || w <= 0) return;
+  if(x < 0) { w += x; x = 0; }
+  if(x + w > SCREEN_WIDTH) w = SCREEN_WIDTH - x;
+  if(w <= 0) return;
+  setWindow(x, y, x + w - 1, y);
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  for(int i = 0; i < w; i++) {
+    hspi.write16(color);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void drawFastVLine(int x, int y, int h, uint16_t color) {
+  if(x >= SCREEN_WIDTH || y >= SCREEN_HEIGHT || h <= 0) return;
+  if(y < 0) { h += y; y = 0; }
+  if(y + h > SCREEN_HEIGHT) h = SCREEN_HEIGHT - y;
+  if(h <= 0) return;
+  setWindow(x, y, x, y + h - 1);
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  for(int i = 0; i < h; i++) {
+    hspi.write16(color);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void fillRect(int x, int y, int w, int h, uint16_t color) {
+  if(x >= SCREEN_WIDTH || y >= SCREEN_HEIGHT || w <= 0 || h <= 0) return;
+  if(x < 0) { w += x; x = 0; }
+  if(y < 0) { h += y; y = 0; }
+  if(x + w > SCREEN_WIDTH) w = SCREEN_WIDTH - x;
+  if(y + h > SCREEN_HEIGHT) h = SCREEN_HEIGHT - y;
+  if(w <= 0 || h <= 0) return;
+  setWindow(x, y, x + w - 1, y + h - 1);
+  digitalWrite(TFT_DC, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  for(int i = 0; i < w * h; i++) {
+    hspi.write16(color);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void drawRect(int x, int y, int w, int h, uint16_t color) {
+  drawFastHLine(x, y, w, color);
+  drawFastHLine(x, y + h - 1, w, color);
+  drawFastVLine(x, y, h, color);
+  drawFastVLine(x + w - 1, y, h, color);
+}
+
+void drawLine(int x0, int y0, int x1, int y1, uint16_t color) {
+  int dx = abs(x1 - x0);
+  int dy = abs(y1 - y0);
+  int sx = (x0 < x1) ? 1 : -1;
+  int sy = (y0 < y1) ? 1 : -1;
+  int err = dx - dy;
+  while(true) {
+    drawPixel(x0, y0, color);
+    if(x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if(e2 > -dy) {
+      err -= dy;
+      x0 += sx;
+    }
+    if(e2 < dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
+void drawCircle(int x0, int y0, int r, uint16_t color) {
+  int f = 1 - r;
+  int ddF_x = 1;
+  int ddF_y = -2 * r;
+  int x = 0;
+  int y = r;
+  drawPixel(x0, y0 + r, color);
+  drawPixel(x0, y0 - r, color);
+  drawPixel(x0 + r, y0, color);
+  drawPixel(x0 - r, y0, color);
+  while(x < y) {
+    if(f >= 0) {
+      y--;
+      ddF_y += 2;
+      f += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f += ddF_x;
+    drawPixel(x0 + x, y0 + y, color);
+    drawPixel(x0 - x, y0 + y, color);
+    drawPixel(x0 + x, y0 - y, color);
+    drawPixel(x0 - x, y0 - y, color);
+    drawPixel(x0 + y, y0 + x, color);
+    drawPixel(x0 - y, y0 + x, color);
+    drawPixel(x0 + y, y0 - x, color);
+    drawPixel(x0 - y, y0 - x, color);
+  }
+}
+
+void fillCircle(int x0, int y0, int r, uint16_t color) {
+  drawFastVLine(x0, y0 - r, 2 * r + 1, color);
+  int f = 1 - r;
+  int ddF_x = 1;
+  int ddF_y = -2 * r;
+  int x = 0;
+  int y = r;
+  while(x < y) {
+    if(f >= 0) {
+      y--;
+      ddF_y += 2;
+      f += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f += ddF_x;
+    drawFastVLine(x0 + x, y0 - y, 2 * y + 1, color);
+    drawFastVLine(x0 - x, y0 - y, 2 * y + 1, color);
+    drawFastVLine(x0 + y, y0 - x, 2 * x + 1, color);
+    drawFastVLine(x0 - y, y0 - x, 2 * x + 1, color);
+  }
+} 
